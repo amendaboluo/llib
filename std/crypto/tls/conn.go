@@ -823,11 +823,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if len(data) > maxPlaintext {
 		return c.in.setErrorLocked(c.sendAlert(alertRecordOverflow))
 	}
-	if len(*c.rawInput) == c.rawInputOff {
-		c.allocator.Free(c.rawInput)
-		c.rawInput = nil
-		c.rawInputOff = 0
-	}
+
+	defer func() {
+		if len(*c.rawInput) == c.rawInputOff {
+			c.allocator.Free(c.rawInput)
+			c.rawInput = nil
+			c.rawInputOff = 0
+		}
+	}()
 
 	// Application Data messages are always protected.
 	if c.in.cipher == nil && typ == recordTypeApplicationData {
@@ -905,7 +908,9 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		// Note that data is owned by c.rawInput, following the Next call above,
 		// to avoid copying the plaintext. This is safe because c.rawInput is
 		// not read from or written to until c.input is drained.
-		c.input.Reset(data)
+		newData := c.allocator.Malloc(len(data))
+		copy(*newData, data)
+		c.input.Reset(*newData)
 
 	case recordTypeHandshake:
 		if len(data) == 0 || expectChangeCipherSpec {
