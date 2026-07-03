@@ -150,7 +150,8 @@ type Conn struct {
 	in, out     halfConn
 	rawInputOff int
 	rawInput    *[]byte      // bytes.Buffer // raw input, starting with a record header
-	input       bytes.Reader // application data waiting to be read, from rawInput.Next
+	inputBuf    *[]byte      // owned copy of decrypted application data, from rawInput
+	input       bytes.Reader // application data waiting to be read, from inputBuf
 	handOff     int
 	hand        *[]byte // bytes.Buffer // handshake data waiting to be read
 
@@ -905,12 +906,16 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		if len(data) == 0 {
 			return c.retryReadRecord(expectChangeCipherSpec)
 		}
-		// Note that data is owned by c.rawInput, following the Next call above,
-		// to avoid copying the plaintext. This is safe because c.rawInput is
-		// not read from or written to until c.input is drained.
-		newData := c.allocator.Malloc(len(data))
-		copy(*newData, data)
-		c.input.Reset(*newData)
+		// data is the decrypted application-data record and currently aliases
+		// memory inside c.rawInput. Copy it into a conn-owned buffer so c.input
+		// stays valid even after c.rawInput is freed early (see the defer below)
+		// or reused by the caller in non-blocking mode.
+		if c.inputBuf != nil {
+			c.allocator.Free(c.inputBuf)
+		}
+		c.inputBuf = c.allocator.Malloc(len(data))
+		copy(*c.inputBuf, data)
+		c.input.Reset(*c.inputBuf)
 
 	case recordTypeHandshake:
 		if len(data) == 0 || expectChangeCipherSpec {
@@ -1653,6 +1658,11 @@ func (c *Conn) release() {
 	if c.rawInput != nil && cap(*c.rawInput) > 0 {
 		c.allocator.Free(c.rawInput)
 		c.rawInput = nil
+	}
+
+	if c.inputBuf != nil && cap(*c.inputBuf) > 0 {
+		c.allocator.Free(c.inputBuf)
+		c.inputBuf = nil
 	}
 }
 
